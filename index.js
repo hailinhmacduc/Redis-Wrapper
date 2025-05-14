@@ -1,75 +1,63 @@
-// index.js
 const express = require('express');
 const redis = require('redis');
-const axios = require('axios');
-const bodyParser = require('body-parser');
-
 const app = express();
 const port = 8080;
 
-app.use(bodyParser.json());
+app.use(express.json());
 
 const client = redis.createClient({
   socket: {
     host: process.env.REDIS_HOST,
-    port: Number(process.env.REDIS_PORT),
-    connectTimeout: 10000
+    port: process.env.REDIS_PORT,
   },
-  password: process.env.REDIS_PASSWORD,
-  database: 0
+  password: process.env.REDIS_PASSWORD
 });
 
-client.on('error', (err) => console.error('Redis Client Error:', err));
+client.on('error', err => console.error('Redis Client Error', err));
 
-const debounceMap = new Map();
-const DEBOUNCE_MS = 3000;
-
-async function processMessages(key, recipientId) {
-  try {
-    const messages = await client.lRange(key, 0, -1);
-    if (messages.length === 0) return;
-
-    await client.del(key);
-    console.log(`Deleted list ${key} after processing.`);
-
-    const webhookUrl = process.env.WEBHOOK_URL;
-    const payload = {
-      id: key,
-      recipientId,
-      messages
-    };
-
-    const response = await axios.post(webhookUrl, payload, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-
-    console.log('✅ Sent to webhook. Status:', response.status);
-  } catch (err) {
-    console.error('❌ Error processing messages:', err.message);
-  }
-}
+let debounceTimeout = null;
+const DEBOUNCE_MS = 10000;
 
 app.post('/', async (req, res) => {
-  const { id, recipientId, messages } = req.body;
-  if (!id || !recipientId || !Array.isArray(messages)) {
-    return res.status(400).json({ error: 'Invalid payload' });
-  }
+  const { id, messages, recipientId } = req.body;
+
+  console.log('[🚀 RECEIVED]', req.body); // 👈 Log toàn bộ request body
 
   await client.connect();
 
+  // Push từng tin nhắn vào Redis list
   for (const msg of messages) {
     await client.rPush(id, msg);
-    console.log(`📩 Added to Redis list [${id}]:`, msg);
   }
 
-  if (debounceMap.has(id)) clearTimeout(debounceMap.get(id));
+  // Clear và set debounce lại
+  if (debounceTimeout) {
+    clearTimeout(debounceTimeout);
+    console.log('⏱️ Debounce timeout reset');
+  }
 
-  const timeout = setTimeout(() => {
-    processMessages(id, recipientId);
-    debounceMap.delete(id);
+  debounceTimeout = setTimeout(async () => {
+    const allMessages = await client.lRange(id, 0, -1);
+    console.log(`[📦 GOM TIN] ${id}`, allMessages);
+
+    await client.del(id);
+
+    // Gửi toàn bộ tin nhắn gom được sang webhook AI
+    const axios = require('axios');
+    try {
+      const response = await axios.post(process.env.WEBHOOK_URL, {
+        id,
+        recipientId,
+        messages: allMessages
+      });
+      console.log('[✅ WEBHOOK GỬI]', response.data);
+    } catch (err) {
+      console.error('[❌ GỬI WEBHOOK LỖI]', err.message);
+    }
+
+    await client.quit();
   }, DEBOUNCE_MS);
 
-  debounceMap.set(id, timeout);
   res.json({ success: true, message: 'Debounce started' });
 });
 
