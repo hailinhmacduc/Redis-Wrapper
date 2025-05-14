@@ -17,6 +17,14 @@ const client = redis.createClient({
 
 client.on('error', err => console.error('Redis Client Error', err));
 
+// ✅ Chỉ connect một lần duy nhất
+(async () => {
+  if (!client.isOpen) {
+    await client.connect();
+    console.log('[🔌 Redis connected]');
+  }
+})();
+
 let debounceTimeout = null;
 const DEBOUNCE_MS = 10000;
 
@@ -30,8 +38,6 @@ app.post('/', async (req, res) => {
     console.warn('[⚠️ BỎ QUA] Dữ liệu không hợp lệ:', { id, recipientId, messages });
     return res.status(400).json({ success: false, message: 'Thiếu id, recipientId hoặc messages rỗng' });
   }
-
-  await client.connect();
 
   try {
     for (const msg of messages) {
@@ -62,14 +68,13 @@ app.post('/', async (req, res) => {
         console.error('[❌ GỬI WEBHOOK LỖI]', err.message);
       }
 
-      await client.quit();
+      // ❌ KHÔNG gọi client.quit() ở đây → giữ kết nối lâu dài
     }, DEBOUNCE_MS);
 
     res.json({ success: true, message: 'Debounce started' });
 
   } catch (err) {
     console.error('[❌ LỖI XỬ LÝ]', err.message);
-    await client.quit();
     res.status(500).json({ success: false, error: err.message });
   }
 });
