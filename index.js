@@ -1,56 +1,78 @@
-const express = require("express");
-const { createClient } = require("redis");
-const axios = require("axios");
+// index.js
+const express = require('express');
+const redis = require('redis');
+const axios = require('axios');
+const bodyParser = require('body-parser');
 
 const app = express();
-app.use(express.json());
+const port = 8080;
 
-const client = createClient({
+app.use(bodyParser.json());
+
+const client = redis.createClient({
   socket: {
     host: process.env.REDIS_HOST,
     port: Number(process.env.REDIS_PORT),
+    connectTimeout: 10000
   },
   password: process.env.REDIS_PASSWORD,
+  database: 0
 });
 
-const DEBOUNCE_MS = 5000;
-const debounceTimers = {};
+client.on('error', (err) => console.error('Redis Client Error:', err));
 
-app.post("/debounce", async (req, res) => {
-  const { senderId, recipientId, message } = req.body;
+const debounceMap = new Map();
+const DEBOUNCE_MS = 3000;
 
-  if (!senderId || !message || !recipientId) {
-    return res.status(400).json({ error: "Missing fields" });
+async function processMessages(key, recipientId) {
+  try {
+    const messages = await client.lRange(key, 0, -1);
+    if (messages.length === 0) return;
+
+    await client.del(key);
+    console.log(`Deleted list ${key} after processing.`);
+
+    const webhookUrl = process.env.WEBHOOK_URL;
+    const payload = {
+      id: key,
+      recipientId,
+      messages
+    };
+
+    const response = await axios.post(webhookUrl, payload, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    console.log('✅ Sent to webhook. Status:', response.status);
+  } catch (err) {
+    console.error('❌ Error processing messages:', err.message);
+  }
+}
+
+app.post('/', async (req, res) => {
+  const { id, recipientId, messages } = req.body;
+  if (!id || !recipientId || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Invalid payload' });
   }
 
   await client.connect();
-  await client.rPush(senderId, message);
-  await client.disconnect();
 
-  if (debounceTimers[senderId]) clearTimeout(debounceTimers[senderId]);
+  for (const msg of messages) {
+    await client.rPush(id, msg);
+    console.log(`📩 Added to Redis list [${id}]:`, msg);
+  }
 
-  debounceTimers[senderId] = setTimeout(async () => {
-    await client.connect();
-    const messages = await client.lRange(senderId, 0, -1);
-    await client.del(senderId);
-    await client.disconnect();
+  if (debounceMap.has(id)) clearTimeout(debounceMap.get(id));
 
-    const payload = {
-      id: senderId,
-      recipientId,
-      messages,
-    };
-
-    try {
-      const response = await axios.post(process.env.WEBHOOK_URL, payload);
-      console.log("AI response:", response.data);
-    } catch (err) {
-      console.error("Webhook error:", err.message);
-    }
+  const timeout = setTimeout(() => {
+    processMessages(id, recipientId);
+    debounceMap.delete(id);
   }, DEBOUNCE_MS);
 
-  return res.json({ success: true });
+  debounceMap.set(id, timeout);
+  res.json({ success: true, message: 'Debounce started' });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Redis wrapper running on port", PORT));
+app.listen(port, () => {
+  console.log(`Redis wrapper running on port ${port}`);
+});
