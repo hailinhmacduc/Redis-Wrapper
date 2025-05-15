@@ -17,7 +17,6 @@ const client = redis.createClient({
 
 client.on('error', err => console.error('Redis Client Error', err));
 
-// ✅ Chỉ connect một lần duy nhất
 (async () => {
   if (!client.isOpen) {
     await client.connect();
@@ -25,8 +24,8 @@ client.on('error', err => console.error('Redis Client Error', err));
   }
 })();
 
-let debounceTimeout = null;
 const DEBOUNCE_MS = 10000;
+const debounceMap = new Map(); // userId -> timeout
 
 app.post('/', async (req, res) => {
   const { id, messages, recipientId } = req.body;
@@ -46,16 +45,17 @@ app.post('/', async (req, res) => {
       }
     }
 
-    if (debounceTimeout) {
-      clearTimeout(debounceTimeout);
-      console.log('⏱️ Debounce timeout reset');
+    if (debounceMap.has(id)) {
+      clearTimeout(debounceMap.get(id));
+      console.log(`⏱️ Reset timeout cho user ${id}`);
     }
 
-    debounceTimeout = setTimeout(async () => {
+    const timeout = setTimeout(async () => {
       const allMessages = await client.lRange(id, 0, -1);
       console.log(`[📦 GOM TIN] ${id}`, allMessages);
 
       await client.del(id);
+      debounceMap.delete(id);
 
       try {
         const response = await axios.post(process.env.WEBHOOK_URL, {
@@ -67,9 +67,9 @@ app.post('/', async (req, res) => {
       } catch (err) {
         console.error('[❌ GỬI WEBHOOK LỖI]', err.message);
       }
-
-      // ❌ KHÔNG gọi client.quit() ở đây → giữ kết nối lâu dài
     }, DEBOUNCE_MS);
+
+    debounceMap.set(id, timeout);
 
     res.json({ success: true, message: 'Debounce started' });
 
